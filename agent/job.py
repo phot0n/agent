@@ -5,6 +5,7 @@ import json
 import os
 import traceback
 from typing import TYPE_CHECKING
+from contextvars import ContextVar
 
 import wrapt
 from peewee import (
@@ -23,6 +24,7 @@ from rq.command import send_stop_job_command
 from rq.job import Job as RQJob
 
 from agent.callbacks import callback
+from agent.utils import ContainerLockManager
 
 if TYPE_CHECKING:
     from agent.base import Base
@@ -36,7 +38,7 @@ if os.environ.get("SENTRY_DSN"):
     except ImportError:
         pass
 
-
+job_level_container_lock_manager = ContextVar("job_level_container_lock_manager")
 agent_database = SqliteDatabase(
     "jobs.sqlite3",
     timeout=15,
@@ -183,6 +185,9 @@ def job(name: str, priority="default", on_success=None, on_failure=None):
 
         if get_current_job(connection=connection()):
             instance.job_record.start()
+
+            lock_manager = ContainerLockManager()
+            lm_token = job_level_container_lock_manager.set(lock_manager)
             try:
                 result = wrapped(*args, **kwargs)
             except AgentException as e:
@@ -193,6 +198,9 @@ def job(name: str, priority="default", on_success=None, on_failure=None):
                 raise e
             else:
                 instance.job_record.success(result)
+            finally:
+                lock_manager.release_all()
+                job_level_container_lock_manager.reset(lm_token)
             return result
         agent_job_id = get_agent_job_id()
         instance.job_record.enqueue(name, wrapped, args, kwargs, agent_job_id)
@@ -209,6 +217,13 @@ def job(name: str, priority="default", on_success=None, on_failure=None):
         return instance.job_record.model.id
 
     return wrapper
+
+
+def get_container_lock_manager():
+    try:
+        return job_level_container_lock_manager.get()
+    except LookupError:
+        return None
 
 
 def get_agent_job_id():

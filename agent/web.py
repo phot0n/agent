@@ -5,11 +5,13 @@ import logging
 import os
 import sys
 import traceback
+import docker
+import redis
 from base64 import b64decode
 from functools import wraps
 from typing import TYPE_CHECKING
 
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify, request, render_template
 from passlib.hash import pbkdf2_sha256 as pbkdf2
 from playhouse.shortcuts import model_to_dict
 from redis.exceptions import ConnectionError as RedisConnectionError
@@ -37,6 +39,7 @@ from agent.server import Server
 from agent.snapshot_recovery import SnapshotRecovery
 from agent.ssh import SSHProxy
 from agent.utils import check_installed_pyspy
+from agent.bench_starter import BenchStarter, Config
 
 if TYPE_CHECKING:
     from datetime import datetime, timedelta
@@ -91,7 +94,7 @@ log.handlers = []
 
 @application.before_request
 def validate_access_token():
-    exempt_endpoints = ["get_metrics"]
+    exempt_endpoints = ["get_metrics", "bench_start", "bench_status"]
     if request.endpoint in exempt_endpoints:
         return None
 
@@ -1838,3 +1841,72 @@ def backup_db():
     offsite = data.get("offsite")
     job = SnapshotRecovery().backup_db(site, database_ip, database_name, mariadb_root_password, offsite)
     return {"job": job}
+
+
+@application.route("/bench-start/<string:bench_name>")
+def bench_start(bench_name):
+    try:
+        client = docker.from_env()
+        container = client.containers.get(bench_name)
+    except docker.errors.NotFound:
+        return render_template("web/web.html", title="Error", message="No Bench found for the site."), 404
+    except Exception as e:
+        return render_template(
+            "web/web.html",
+            title="Error",
+            message="""An unexpected error occurred while communicating with the Docker service.\n
+                Please try again later or contact support if the issue persists."""
+        ), 500
+
+    title = "Bench Status"
+    message, status = "Bench is already running or restarting.", 200
+
+    if container.status not in ("running", "restarting"):
+        title = "Request Status"
+        req_status = BenchStarter().queue_request(bench_name)
+        if req_status == "REQUEST_ALREADY_EXISTS":
+            message = "Request for the bench to start is already enqueued."
+        elif req_status == "THROTTLED":
+            # TODO: adding 429 status leads to daily usage limit exceeded template being rendered
+            message = "A request for bench-start failed recently. Please try again after some time."
+            title = "Throttled"
+        else:
+            message, status = "Request Queued. It may take a few minutes to start things. \nYou can check the status at /bench-status.", 202
+
+    return render_template("web/web.html", title=title, message=message), status
+
+
+@application.route("/bench-status/<string:bench_name>")
+def bench_status(bench_name):
+    try:
+        client = docker.from_env()
+        container = client.containers.get(bench_name)
+    except docker.errors.NotFound:
+        return render_template("web/web.html", title="Error", message="No Bench found for the site."), 404
+    except Exception as e:
+        return render_template(
+            "web/web.html",
+            title="Error",
+            message="""An unexpected error occurred while communicating with the Docker service.\n
+                Please try again later or contact support if the issue persists."""
+        ), 500
+
+    title = "Bench Status"
+    message, status = container.status.capitalize(), 200
+
+    if container.status in ("exited", "stopped"):
+        redis_instance = redis.Redis(port=Server().config["redis_port"], decode_responses=True)
+        if redis_instance.zscore(Config.redis_queue_key, bench_name):
+            return (
+                render_template(
+                    "web/web.html", title=title, message=(message + "\nRequest for the bench to start is enqueued.")
+                ),
+                status
+            )
+
+        # Check in failed hash
+        failed_info = redis_instance.hget(f"{Config.redis_failed_hash_key}:{bench_name}", "info")
+        if failed_info:
+            message = message + "\nBench failed to start." + f" {failed_info}."
+
+    return render_template("web/web.html", title=title, message=message), status

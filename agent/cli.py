@@ -74,7 +74,8 @@ def ping_server(password: str):
 @click.option("--proxy-ip", required=False, type=str, default=None)
 @click.option("--sentry-dsn", required=False, type=str)
 @click.option("--press-url", required=False, type=str)
-def config(name, user, workers, proxy_ip=None, sentry_dsn=None, press_url=None):
+@click.option("--allow-sleepy-containers", is_flag=True)
+def config(name, user, workers, proxy_ip=None, sentry_dsn=None, press_url=None,allow_sleepy_containers=False):
     config = {
         "benches_directory": f"/home/{user}/benches",
         "name": name,
@@ -83,9 +84,10 @@ def config(name, user, workers, proxy_ip=None, sentry_dsn=None, press_url=None):
         "redis_port": 25025,
         "user": user,
         "workers": workers,
-        "gunicorn_workers": 2,
+        "gunicorn_workers": 2 if not allow_sleepy_containers else 3,
         "web_port": 25052,
         "press_url": "https://frappecloud.com",
+        "allow_sleepy_containers": allow_sleepy_containers,
     }
     if press_url:
         config["press_url"] = press_url
