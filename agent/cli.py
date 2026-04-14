@@ -85,7 +85,7 @@ def config(name, user, workers, proxy_ip=None, sentry_dsn=None, press_url=None):
         "workers": workers,
         "gunicorn_workers": 2,
         "web_port": 25052,
-        "press_url": "https://frappecloud.com",
+        "press_url": "https://cloud.frappe.io",
     }
     if press_url:
         config["press_url"] = press_url
